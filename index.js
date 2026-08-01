@@ -19,7 +19,7 @@ const DATABASE_URL = process.env.DATABASE_URL || 'YOUR_FIREBASE_URL_HERE';
 const BOT_PASSWORD = process.env.BOT_PASSWORD || '1234';
 
 // Constants
-const DEVICES_PER_PAGE = 100;
+const DEVICES_PER_PAGE = 10;
 const DATA_FILE = path.join(__dirname, 'bot_config.json');
 
 // ============================================
