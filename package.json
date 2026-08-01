@@ -1,0 +1,14 @@
+{
+  "name": "sms-sender-bot",
+  "version": "1.0.0",
+  "description": "SMS Sender Bot with password protection",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.3.1",
+    "telegraf": "^4.15.0",
+    "eventsource": "^2.0.2"
+  }
+}
